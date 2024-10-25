@@ -26,6 +26,7 @@ typedef struct {
     int pattern_length;
     int registered;
     int has_won;
+    int currently_playing; // New variable to track if the client is playing in the current game
 } ClientInfo;
 
 // Structure to hold statistics for patterns
@@ -49,8 +50,8 @@ void handle_client_message(int server_fd, ClientInfo clients[], PatternStats pat
                            int *coin_sequence_length, int *completed_games, int *max_pattern_length,
                            socklen_t addr_len, int *next_client_id);
 void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
-                       char coin_sequence[], int coin_sequence_length, PatternStats pattern_stats[],
-                       int *pattern_stats_count, int *messages_sent, int* messages_received, int *total_message_length,
+                       char coin_sequence[], int *coin_sequence_length, PatternStats pattern_stats[],
+                       int *pattern_stats_count, int *messages_sent, int *messages_received, int *total_message_length,
                        int *game_in_progress, int *completed_games, socklen_t addr_len);
 void update_pattern_stats(PatternStats pattern_stats[], int *pattern_stats_count,
                           ClientInfo client, int coin_sequence_length, int win);
@@ -168,6 +169,7 @@ void initialize_clients(ClientInfo clients[]) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         clients[i].registered = 0;
         clients[i].has_won = 0;
+        clients[i].currently_playing = 0; // Initialize currently_playing to 0
     }
 }
 
@@ -193,6 +195,7 @@ int register_client(int server_fd, ClientInfo clients[], struct sockaddr_in clie
             clients[i].pattern_length = strlen(clients[i].pattern);
             clients[i].registered = 1;
             clients[i].has_won = 0;
+            clients[i].currently_playing = 1; // Set currently_playing to 1 upon registration
 
             // Convert pattern to 'H's and 'T's for display
             for (int k = 0; k < clients[i].pattern_length; k++) {
@@ -238,39 +241,49 @@ void handle_client_message(int server_fd, ClientInfo clients[], PatternStats pat
         int client_index = find_client_index(clients, client_id);
         if (client_index != -1) {
             // Handle messages from registered clients
-            if (strncmp(buffer, "WIN", 3) == 0) {
+            if (strstr(buffer, "WIN") != NULL) {
                 // Client claims to have won
-                process_win_claim(server_fd, clients, client_index, coin_sequence, *coin_sequence_length,
+                process_win_claim(server_fd, clients, client_index, coin_sequence, coin_sequence_length,
                                   pattern_stats, pattern_stats_count, messages_sent, messages_received, total_message_length,
                                   game_in_progress, completed_games, addr_len);
+            } else if (strstr(buffer, "READY") != NULL) {
+                // Client is ready to play again
+                clients[client_index].currently_playing = 1;
+                printf("Client ID %d is ready to play again.\n", client_id);
             }
         } else {
             printf("Received message from unknown client ID %d\n", client_id);
         }
     }
 
-    // Check if enough clients have registered to start the game
+    // Check if enough clients are ready to start the game
     if (!(*game_in_progress)) {
-        int registered_clients = 0;
+        int ready_clients = 0;
         for (int j = 0; j < MAX_CLIENTS; j++) {
-            if (clients[j].registered) {
-                registered_clients++;
-                clients[j].has_won = 0; // Reset win status at the start of the game
+            if (clients[j].registered && clients[j].currently_playing) {
+                ready_clients++;
             }
         }
 
-        if (registered_clients >= MIN_PLAYERS) {
-            printf("Minimum number of clients registered. Starting game...\n");
+        if (ready_clients >= MIN_PLAYERS) {
+            printf("Minimum number of clients ready (%d). Starting game...\n", ready_clients);
             *game_in_progress = 1;
             *coin_sequence_length = 0;
             memset(coin_sequence, 0, sizeof(char) * 1024);
+
+            // Reset clients' has_won flags at the start of the new game
+            for (int j = 0; j < MAX_CLIENTS; j++) {
+                if (clients[j].registered && clients[j].currently_playing) {
+                    clients[j].has_won = 0;
+                }
+            }
         }
     }
 }
 
 void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
-                       char coin_sequence[], int coin_sequence_length, PatternStats pattern_stats[],
-                       int *pattern_stats_count, int *messages_sent, int* messages_received, int *total_message_length,
+                       char coin_sequence[], int *coin_sequence_length, PatternStats pattern_stats[],
+                       int *pattern_stats_count, int *messages_sent, int *messages_received, int *total_message_length,
                        int *game_in_progress, int *completed_games, socklen_t addr_len) {
     if (clients[client_index].has_won) {
         // Client has already won
@@ -284,8 +297,8 @@ void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
 
     // Validate the client's claim
     int pattern_length = clients[client_index].pattern_length;
-    if (coin_sequence_length >= pattern_length) {
-        int start_index = coin_sequence_length - pattern_length;
+    if (*coin_sequence_length >= pattern_length) {
+        int start_index = *coin_sequence_length - pattern_length;
         if (strncmp(&coin_sequence[start_index], clients[client_index].pattern, pattern_length) == 0) {
             // Client's pattern matches the coin sequence
             printf("Client %s:%d (ID %d) is validated as winner.\n",
@@ -296,7 +309,7 @@ void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
             clients[client_index].has_won = 1;
 
             // Update statistics
-            update_pattern_stats(pattern_stats, pattern_stats_count, clients[client_index], coin_sequence_length, 1);
+            update_pattern_stats(pattern_stats, pattern_stats_count, clients[client_index], *coin_sequence_length, 1);
 
             // Send win message to the winner
             const char *win_message = "WIN";
@@ -308,7 +321,7 @@ void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
             // Inform all other clients that they have lost
             const char *lose_message = "LOSE";
             for (int i = 0; i < MAX_CLIENTS; i++) {
-                if (clients[i].registered && i != client_index && !clients[i].has_won) {
+                if (clients[i].registered && i != client_index && !clients[i].has_won && clients[i].currently_playing) {
                     sendto(server_fd, lose_message, strlen(lose_message), 0,
                            (struct sockaddr *)&clients[i].address, addr_len);
                     (*messages_sent)++;
@@ -324,13 +337,20 @@ void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
                     clients[i].has_won = 1; // Mark as having finished the game
 
                     // Update statistics for losing client
-                    update_pattern_stats(pattern_stats, pattern_stats_count, clients[i], coin_sequence_length, 0);
+                    update_pattern_stats(pattern_stats, pattern_stats_count, clients[i], *coin_sequence_length, 0);
                 }
             }
 
             // End the game
             *game_in_progress = 0;
             (*completed_games)++;
+
+            // Set currently_playing to 0 for all clients
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+                if (clients[i].registered) {
+                    clients[i].currently_playing = 0;
+                }
+            }
 
             // Print diagnostics
             print_diagnostics(*messages_sent, *messages_received, *total_message_length, *completed_games);
@@ -340,7 +360,7 @@ void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
 
             // Reset the game state
             memset(coin_sequence, 0, sizeof(char) * 1024);
-            coin_sequence_length = 0;
+            *coin_sequence_length = 0;
 
         } else {
             // Invalid win claim
@@ -432,9 +452,9 @@ void send_coin_flip(int server_fd, ClientInfo clients[], int *messages_sent, int
         coin_sequence[*coin_sequence_length - 1] = coin_flip_char;
     }
 
-    // Send the coin flip to all clients
+    // Send the coin flip to all clients who are currently playing
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].registered && !clients[i].has_won) {
+        if (clients[i].registered && clients[i].currently_playing) {
             sendto(server_fd, &coin_flip_char, 1, 0,
                    (struct sockaddr *)&clients[i].address, addr_len);
             (*messages_sent)++;
