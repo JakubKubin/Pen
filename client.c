@@ -171,6 +171,29 @@ int main() {
             close(sock);
             return -1;
         }
+        if (game_over) {
+            // Prompt the user to play again
+            char choice;
+            printf("Do you want to play again? (y/n): ");
+            scanf(" %c", &choice);
+            if (choice == 'y' || choice == 'Y') {
+                // Send READY message to the server
+                char ready_message[16];
+                snprintf(ready_message, sizeof(ready_message), "ID %d READY", client_id);
+                sendto(sock, ready_message, strlen(ready_message), 0, (const struct sockaddr *)&serv_addr, addr_len);
+                printf("Sent READY message to server.\n");
+                // Reset game variables
+                game_over = 0;
+                flips = 0;
+                sequence_length = 0;
+                continue;
+            } else {
+                // Close the socket and exit
+                close(sock);
+                printf("Connection closed.\n");
+                return 0;
+            }
+        }
     }
 
     // Close the socket
