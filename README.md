@@ -1,4 +1,4 @@
 # Pen
-bash run.sh
+>bash run.sh
 
-make run-client
+>make run-client
