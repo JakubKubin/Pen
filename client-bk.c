@@ -8,11 +8,11 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <sys/select.h>
+#include <netinet/in.h>
 
 #define PORT 8080
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 256
 #define MAX_PATTERN_LENGTH 16
 
 int main() {
@@ -21,12 +21,12 @@ int main() {
     socklen_t addr_len = sizeof(struct sockaddr_in);
     char pattern[MAX_PATTERN_LENGTH];
     char pattern_binary[MAX_PATTERN_LENGTH]; // Pattern converted to '0's and '1's
-    char buffer[BUFFER_SIZE] = {0};
+    char buffer[BUFFER_SIZE];
     char coin_flip_char;
     char coin_flip;
-    char sequence[BUFFER_SIZE] = {0};
-    int flips = 0;
     int pattern_length;
+    int flips = 0;
+    char sequence[1024];
     int sequence_length = 0;
 
     // Input pattern from user
@@ -76,58 +76,68 @@ int main() {
     // Wait for game to start
     printf("Waiting for game to start...\n");
 
-    // Initialize variables for pattern detection
+    // Set socket timeout to prevent blocking indefinitely
+    struct timeval timeout;
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0; // 5 seconds
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    int game_over = 0;
     flips = 0;
     sequence_length = 0;
 
-    // Set socket timeout to prevent blocking indefinitely
-    struct timeval timeout;
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 500000; // 500 milliseconds
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-    while (1) {
-        // Start receiving coin flips from the server
-        valread = recvfrom(sock, &coin_flip_char, 1, 0, NULL, NULL);
+    while (!game_over) {
+        // Receive data from the server
+        valread = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, NULL, NULL);
         if (valread > 0) {
-            flips++;
+            buffer[valread] = '\0';
 
-            // Convert '0'/'1' to 'H'/'T' for display
-            if (coin_flip_char == '0') {
-                coin_flip = 'H';
-            } else if (coin_flip_char == '1') {
-                coin_flip = 'T';
+            // Check if it's a win or lose message
+            if (strcmp(buffer, "WIN") == 0) {
+                printf("You have won the game with pattern '%s'!\n", pattern);
+                game_over = 1;
+            } else if (strcmp(buffer, "LOSE") == 0) {
+                printf("You have lost the game. Better luck next time!\n");
+                game_over = 1;
+            } else if (strcmp(buffer, "INVALID WIN") == 0) {
+                printf("Your win claim was invalid.\n");
             } else {
-                printf("Received invalid coin flip from server.\n");
-                continue;
-            }
+                // Assume it's a coin flip
+                coin_flip_char = buffer[0];
+                flips++;
 
-            // Add coin flip to sequence (store as '0's and '1's)
-            if (sequence_length < BUFFER_SIZE - 1) {
-                sequence[sequence_length++] = coin_flip_char;
-                sequence[sequence_length] = '\0';
-            } else {
-                printf("Sequence buffer overflow.\n");
-                break;
-            }
+                // Convert '0'/'1' to 'H'/'T' for display
+                if (coin_flip_char == '0') {
+                    coin_flip = 'H';
+                } else if (coin_flip_char == '1') {
+                    coin_flip = 'T';
+                } else {
+                    printf("Received invalid coin flip from server.\n");
+                    continue;
+                }
 
-            // Print the coin flip
-            printf("Received coin flip: %c\n", coin_flip);
+                // Print the coin flip
+                printf("Received coin flip: %c\n", coin_flip);
 
-            // Check if the latest part of the sequence matches the pattern
-            if (sequence_length >= pattern_length) {
-                if (strncmp(&sequence[sequence_length - pattern_length], pattern_binary, pattern_length) == 0) {
-                    // Pattern matched
-                    printf("Your pattern '%s' occurred after %d flips!\n", pattern, flips);
+                // Append to local sequence
+                if (sequence_length < sizeof(sequence) - 1) {
+                    sequence[sequence_length++] = coin_flip_char;
+                    sequence[sequence_length] = '\0';
+                } else {
+                    // Shift the sequence to make room
+                    memmove(sequence, sequence + 1, sequence_length - 1);
+                    sequence[sequence_length - 1] = coin_flip_char;
+                }
 
-                    // Prepare the message with pattern and flips required
-                    sprintf(buffer, "WIN %s %d", pattern_binary, flips);
-                    // Send the message
-                    sendto(sock, buffer, strlen(buffer), 0, (const struct sockaddr *)&serv_addr, addr_len);
-                    printf("Win reported to server.\n");
-
-                    // Break to continue or exit
-                    break;
+                // Check for pattern match
+                if (sequence_length >= pattern_length) {
+                    int start_index = sequence_length - pattern_length;
+                    if (strncmp(&sequence[start_index], pattern_binary, pattern_length) == 0) {
+                        // Send "WIN" message to server
+                        const char *win_message = "WIN";
+                        sendto(sock, win_message, strlen(win_message), 0, (const struct sockaddr *)&serv_addr, addr_len);
+                        printf("Your pattern '%s' occurred after %d flips. Claiming win...\n", pattern, flips);
+                    }
                 }
             }
         } else if (valread == 0 || (valread < 0 && errno == EWOULDBLOCK)) {

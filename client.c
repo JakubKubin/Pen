@@ -25,6 +25,10 @@ int main() {
     char coin_flip_char;
     char coin_flip;
     int pattern_length;
+    int flips = 0;
+    char sequence[1024];
+    int sequence_length = 0;
+    int client_id = -1;
 
     // Input pattern from user
     printf("Enter your pattern (e.g., HHT): ");
@@ -66,9 +70,29 @@ int main() {
         return -1;
     }
 
-    // Send pattern to server for registration (send '0's and '1's)
-    sendto(sock, pattern_binary, strlen(pattern_binary), 0, (const struct sockaddr *)&serv_addr, addr_len);
+    // Send registration message to server
+    char register_message[BUFFER_SIZE];
+    snprintf(register_message, sizeof(register_message), "REGISTER %s", pattern_binary);
+    sendto(sock, register_message, strlen(register_message), 0, (const struct sockaddr *)&serv_addr, addr_len);
     printf("Pattern '%s' sent to server for registration.\n", pattern);
+
+    // Receive client ID from server
+    valread = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, NULL, NULL);
+    if (valread > 0) {
+        buffer[valread] = '\0';
+        if (strncmp(buffer, "ID", 2) == 0) {
+            sscanf(buffer + 3, "%d", &client_id);
+            printf("Received client ID: %d\n", client_id);
+        } else {
+            printf("Failed to receive client ID from server.\n");
+            close(sock);
+            return -1;
+        }
+    } else {
+        printf("Failed to receive client ID from server.\n");
+        close(sock);
+        return -1;
+    }
 
     // Wait for game to start
     printf("Waiting for game to start...\n");
@@ -80,6 +104,8 @@ int main() {
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     int game_over = 0;
+    flips = 0;
+    sequence_length = 0;
 
     while (!game_over) {
         // Receive data from the server
@@ -87,13 +113,19 @@ int main() {
         if (valread > 0) {
             buffer[valread] = '\0';
 
-            // Check if it's a win message
+            // Check if it's a win or lose message
             if (strcmp(buffer, "WIN") == 0) {
                 printf("You have won the game with pattern '%s'!\n", pattern);
                 game_over = 1;
+            } else if (strcmp(buffer, "LOSE") == 0) {
+                printf("You have lost the game. Better luck next time!\n");
+                game_over = 1;
+            } else if (strcmp(buffer, "INVALID WIN") == 0) {
+                printf("Your win claim was invalid.\n");
             } else {
                 // Assume it's a coin flip
                 coin_flip_char = buffer[0];
+                flips++;
 
                 // Convert '0'/'1' to 'H'/'T' for display
                 if (coin_flip_char == '0') {
@@ -107,6 +139,28 @@ int main() {
 
                 // Print the coin flip
                 printf("Received coin flip: %c\n", coin_flip);
+
+                // Append to local sequence
+                if (sequence_length < sizeof(sequence) - 1) {
+                    sequence[sequence_length++] = coin_flip_char;
+                    sequence[sequence_length] = '\0';
+                } else {
+                    // Shift the sequence to make room
+                    memmove(sequence, sequence + 1, sequence_length - 1);
+                    sequence[sequence_length - 1] = coin_flip_char;
+                }
+
+                // Check for pattern match
+                if (sequence_length >= pattern_length) {
+                    int start_index = sequence_length - pattern_length;
+                    if (strncmp(&sequence[start_index], pattern_binary, pattern_length) == 0) {
+                        // Send "WIN" message to server with client ID
+                        char win_message[16];
+                        snprintf(win_message, sizeof(win_message), "ID %d WIN", client_id);
+                        sendto(sock, win_message, strlen(win_message), 0, (const struct sockaddr *)&serv_addr, addr_len);
+                        printf("Your pattern '%s' occurred after %d flips. Claiming win...\n", pattern, flips);
+                    }
+                }
             }
         } else if (valread == 0 || (valread < 0 && errno == EWOULDBLOCK)) {
             // No data received, continue waiting

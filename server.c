@@ -19,8 +19,10 @@
 
 // Structure to hold client information
 typedef struct {
+    int client_id;  // Unique client ID
     struct sockaddr_in address;
-    char pattern[MAX_PATTERN_LENGTH];
+    char pattern[MAX_PATTERN_LENGTH];         // Stored as '0's and '1's
+    char pattern_display[MAX_PATTERN_LENGTH]; // Stored as 'H's and 'T's for display
     int pattern_length;
     int registered;
     int has_won;
@@ -29,10 +31,33 @@ typedef struct {
 // Structure to hold statistics for patterns
 typedef struct {
     char pattern[MAX_PATTERN_LENGTH];
+    char pattern_display[MAX_PATTERN_LENGTH];
     int wins;
     int total_games;
     int total_flips;
 } PatternStats;
+
+// Function declarations
+void initialize_clients(ClientInfo clients[]);
+int find_client_index(ClientInfo clients[], int client_id);
+int register_client(int server_fd, ClientInfo clients[], struct sockaddr_in client_addr, char buffer[],
+                    int *max_pattern_length, socklen_t addr_len, int *next_client_id);
+void handle_client_message(int server_fd, ClientInfo clients[], PatternStats pattern_stats[],
+                           int *pattern_stats_count, char buffer[], int valread,
+                           struct sockaddr_in client_addr, int *messages_sent, int *messages_received,
+                           int *total_message_length, int *game_in_progress, char coin_sequence[],
+                           int *coin_sequence_length, int *completed_games, int *max_pattern_length,
+                           socklen_t addr_len, int *next_client_id);
+void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
+                       char coin_sequence[], int coin_sequence_length, PatternStats pattern_stats[],
+                       int *pattern_stats_count, int *messages_sent, int* messages_received, int *total_message_length,
+                       int *game_in_progress, int *completed_games, socklen_t addr_len);
+void update_pattern_stats(PatternStats pattern_stats[], int *pattern_stats_count,
+                          ClientInfo client, int coin_sequence_length, int win);
+void print_diagnostics(int messages_sent, int messages_received, int total_message_length, int completed_games);
+void print_statistics(PatternStats pattern_stats[], int pattern_stats_count);
+void send_coin_flip(int server_fd, ClientInfo clients[], int *messages_sent, int *total_message_length,
+                    char coin_sequence[], int *coin_sequence_length, socklen_t addr_len);
 
 int main() {
     int server_fd, i, valread;
@@ -51,10 +76,7 @@ int main() {
     PatternStats pattern_stats[MAX_CLIENTS * 2]; // Assuming possible different patterns
     int pattern_stats_count = 0;
 
-    for (i = 0; i < MAX_CLIENTS; i++) {
-        clients[i].registered = 0;
-        clients[i].has_won = 0;
-    }
+    initialize_clients(clients);
 
     // Seed the random number generator once
     srand(time(NULL));
@@ -69,7 +91,7 @@ int main() {
     memset(&server_addr, 0, sizeof(server_addr));
 
     // Fill server information
-    server_addr.sin_family = AF_INET; // IPv4
+    server_addr.sin_family = AF_INET;      // IPv4
     server_addr.sin_addr.s_addr = INADDR_ANY; // Bind to all interfaces
     server_addr.sin_port = htons(PORT);
 
@@ -87,13 +109,14 @@ int main() {
     // Maximum pattern length among all clients
     int max_pattern_length = 0;
 
-    // Sequence buffer of size max_pattern_length
-    char coin_sequence[MAX_PATTERN_LENGTH];
+    // Sequence buffer to store coin flips
+    char coin_sequence[1024]; // Store entire sequence for validation
     int coin_sequence_length = 0;
 
-    int total_clients = 0;
     fd_set readfds;
     struct timeval timeout;
+
+    int next_client_id = 1; // Counter for assigning unique client IDs
 
     while (1) {
         // Set timeout for select
@@ -114,189 +137,308 @@ int main() {
 
         if (FD_ISSET(server_fd, &readfds)) {
             // Receive message from client
-            valread = recvfrom(server_fd, buffer, sizeof(buffer), 0,
+            valread = recvfrom(server_fd, buffer, sizeof(buffer) - 1, 0,
                                (struct sockaddr *)&client_addr, &addr_len);
             if (valread > 0) {
                 buffer[valread] = '\0';
                 messages_received++;
                 total_message_length += valread;
 
-                // Check if the client is already registered
-                int client_index = -1;
-                for (i = 0; i < MAX_CLIENTS; i++) {
-                    if (clients[i].registered &&
-                        clients[i].address.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-                        clients[i].address.sin_port == client_addr.sin_port) {
-                        client_index = i;
-                        break;
-                    }
-                }
-
-                // If not registered, register the client
-                if (client_index == -1) {
-                    // Register new client
-                    for (i = 0; i < MAX_CLIENTS; i++) {
-                        if (!clients[i].registered) {
-                            clients[i].address = client_addr;
-                            // Store the pattern as received ('0's and '1's)
-                            strncpy(clients[i].pattern, buffer, MAX_PATTERN_LENGTH - 1);
-                            clients[i].pattern[MAX_PATTERN_LENGTH - 1] = '\0';
-                            clients[i].pattern_length = strlen(clients[i].pattern);
-                            clients[i].registered = 1;
-                            clients[i].has_won = 0;
-                            client_index = i;
-                            printf("New client registered: %s:%d with pattern %s\n",
-                                   inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port),
-                                   clients[i].pattern);
-                            total_clients++;
-
-                            // Update maximum pattern length
-                            if (clients[i].pattern_length > max_pattern_length) {
-                                max_pattern_length = clients[i].pattern_length;
-                            }
-
-                            break;
-                        }
-                    }
-                } else {
-                    // Handle any additional messages from clients if needed
-                    // For this scenario, we don't expect any additional messages
-                }
-
-                // Check if enough clients have registered to start the game
-                if (!game_in_progress) {
-                    int registered_clients = 0;
-                    for (int j = 0; j < MAX_CLIENTS; j++) {
-                        if (clients[j].registered) {
-                            registered_clients++;
-                        }
-                    }
-
-                    if (registered_clients >= MIN_PLAYERS) {
-                        printf("Minimum number of clients registered. Starting game...\n");
-                        game_in_progress = 1;
-                        coin_sequence_length = 0;
-                        memset(coin_sequence, 0, sizeof(coin_sequence));
-                        // Reset clients' win status
-                        for (int j = 0; j < MAX_CLIENTS; j++) {
-                            if (clients[j].registered) {
-                                clients[j].has_won = 0;
-                            }
-                        }
-                    }
-                }
+                handle_client_message(server_fd, clients, pattern_stats, &pattern_stats_count,
+                                      buffer, valread, client_addr, &messages_sent, &messages_received,
+                                      &total_message_length, &game_in_progress, coin_sequence,
+                                      &coin_sequence_length, &completed_games, &max_pattern_length, addr_len, &next_client_id);
             }
         }
 
         // If game is in progress, send coin flips
         if (game_in_progress) {
-            // Generate a random bit
-            int rand_bit = rand() % 2;
-            char coin_flip_char = rand_bit ? '1' : '0'; // Use '0' and '1'
-
-            // Update coin_sequence buffer
-            if (coin_sequence_length < max_pattern_length) {
-                coin_sequence[coin_sequence_length++] = coin_flip_char;
-            } else {
-                // Shift the buffer to the left by one and append the new coin flip
-                memmove(coin_sequence, coin_sequence + 1, max_pattern_length - 1);
-                coin_sequence[max_pattern_length - 1] = coin_flip_char;
-            }
-
-            // Send the coin flip to all clients
-            for (i = 0; i < MAX_CLIENTS; i++) {
-                if (clients[i].registered) {
-                    sendto(server_fd, &coin_flip_char, 1, 0,
-                           (struct sockaddr *)&clients[i].address, addr_len);
-                    messages_sent++;
-                    total_message_length += 1;
-                }
-            }
-
-            // Check for pattern matches for each client
-            for (i = 0; i < MAX_CLIENTS; i++) {
-                if (clients[i].registered && !clients[i].has_won) {
-                    if (coin_sequence_length >= clients[i].pattern_length) {
-                        int start_index = coin_sequence_length - clients[i].pattern_length;
-                        if (strncmp(&coin_sequence[start_index], clients[i].pattern, clients[i].pattern_length) == 0) {
-                            // Client's pattern matched
-                            clients[i].has_won = 1;
-                            printf("Client %s:%d won with pattern %s after %d flips\n",
-                                   inet_ntoa(clients[i].address.sin_addr),
-                                   ntohs(clients[i].address.sin_port),
-                                   clients[i].pattern, messages_sent);
-
-                            // Update statistics
-                            int found = 0;
-                            for (int j = 0; j < pattern_stats_count; j++) {
-                                if (strcmp(pattern_stats[j].pattern, clients[i].pattern) == 0) {
-                                    pattern_stats[j].wins++;
-                                    pattern_stats[j].total_flips += messages_sent;
-                                    pattern_stats[j].total_games++;
-                                    found = 1;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                // Add new pattern stats
-                                strcpy(pattern_stats[pattern_stats_count].pattern, clients[i].pattern);
-                                pattern_stats[pattern_stats_count].wins = 1;
-                                pattern_stats[pattern_stats_count].total_flips = messages_sent;
-                                pattern_stats[pattern_stats_count].total_games = 1;
-                                pattern_stats_count++;
-                            }
-
-                            // Send win message to client
-                            const char *win_message = "WIN";
-                            sendto(server_fd, win_message, strlen(win_message), 0,
-                                   (struct sockaddr *)&clients[i].address, addr_len);
-                            messages_sent++;
-                            total_message_length += strlen(win_message);
-                        }
-                    }
-                }
-            }
-
-            // Check if all clients have won
-            int all_won = 1;
-            for (i = 0; i < MAX_CLIENTS; i++) {
-                if (clients[i].registered && !clients[i].has_won) {
-                    all_won = 0;
-                    break;
-                }
-            }
-
-            if (all_won) {
-                // End the game
-                game_in_progress = 0;
-                completed_games++;
-
-                // Print diagnostics
-                printf("\n--- Diagnostics ---\n");
-                printf("Messages sent: %d\n", messages_sent);
-                printf("Messages received: %d\n", messages_received);
-                printf("Average message length: %.2f bytes\n",
-                       (messages_sent + messages_received) > 0
-                           ? (float)total_message_length / (messages_sent + messages_received)
-                           : 0.0);
-                printf("Completed games: %d\n", completed_games);
-                printf("\n--- Statistics ---\n");
-                for (int j = 0; j < pattern_stats_count; j++) {
-                    float win_probability = (float)pattern_stats[j].wins / pattern_stats[j].total_games;
-                    float average_flips = (float)pattern_stats[j].total_flips / pattern_stats[j].total_games;
-                    printf("Pattern: %s, Wins: %d, Total Games: %d, Win Probability: %.2f, Average Flips: %.2f\n",
-                           pattern_stats[j].pattern, pattern_stats[j].wins,
-                           pattern_stats[j].total_games, win_probability, average_flips);
-                }
-                printf("-------------------\n");
-
-                // Prepare for next game
-                // Remove clients who have disconnected or reset their registration if desired
-                // For now, clients remain registered for the next game
-            }
+            send_coin_flip(server_fd, clients, &messages_sent, &total_message_length,
+                           coin_sequence, &coin_sequence_length, addr_len);
         }
     }
 
     close(server_fd);
     return 0;
+}
+
+// Function definitions
+
+void initialize_clients(ClientInfo clients[]) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        clients[i].registered = 0;
+        clients[i].has_won = 0;
+    }
+}
+
+int find_client_index(ClientInfo clients[], int client_id) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].registered && clients[i].client_id == client_id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int register_client(int server_fd, ClientInfo clients[], struct sockaddr_in client_addr, char buffer[],
+                    int *max_pattern_length, socklen_t addr_len, int *next_client_id) {
+    int client_index = -1;
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (!clients[i].registered) {
+            clients[i].client_id = (*next_client_id)++;
+            clients[i].address = client_addr;
+            // Store the pattern as received ('0's and '1's)
+            strncpy(clients[i].pattern, buffer, MAX_PATTERN_LENGTH - 1);
+            clients[i].pattern[MAX_PATTERN_LENGTH - 1] = '\0';
+            clients[i].pattern_length = strlen(clients[i].pattern);
+            clients[i].registered = 1;
+            clients[i].has_won = 0;
+
+            // Convert pattern to 'H's and 'T's for display
+            for (int k = 0; k < clients[i].pattern_length; k++) {
+                clients[i].pattern_display[k] = (clients[i].pattern[k] == '0') ? 'H' : 'T';
+            }
+            clients[i].pattern_display[clients[i].pattern_length] = '\0';
+
+            client_index = i;
+            printf("New client registered: %s:%d with pattern %s, assigned ID %d\n",
+                   inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port),
+                   clients[i].pattern_display, clients[i].client_id);
+
+            // Send the client ID to the client
+            char id_message[16];
+            sprintf(id_message, "ID %d", clients[i].client_id);
+            sendto(server_fd, id_message, strlen(id_message), 0, (struct sockaddr *)&client_addr, addr_len);
+
+            // Update maximum pattern length
+            if (clients[i].pattern_length > *max_pattern_length) {
+                *max_pattern_length = clients[i].pattern_length;
+            }
+
+            break;
+        }
+    }
+    return client_index;
+}
+
+void handle_client_message(int server_fd, ClientInfo clients[], PatternStats pattern_stats[],
+                           int *pattern_stats_count, char buffer[], int valread,
+                           struct sockaddr_in client_addr, int *messages_sent, int *messages_received,
+                           int *total_message_length, int *game_in_progress, char coin_sequence[],
+                           int *coin_sequence_length, int *completed_games, int *max_pattern_length,
+                           socklen_t addr_len, int *next_client_id) {
+    int client_id = -1;
+    if (strncmp(buffer, "REGISTER", 8) == 0) {
+        // New client registration
+        char *pattern = buffer + 9; // Skip "REGISTER "
+        register_client(server_fd, clients, client_addr, pattern, max_pattern_length, addr_len, next_client_id);
+    } else if (strncmp(buffer, "ID", 2) == 0) {
+        // Extract client ID
+        sscanf(buffer + 3, "%d", &client_id);
+        int client_index = find_client_index(clients, client_id);
+        if (client_index != -1) {
+            // Handle messages from registered clients
+            if (strncmp(buffer, "WIN", 3) == 0) {
+                // Client claims to have won
+                process_win_claim(server_fd, clients, client_index, coin_sequence, *coin_sequence_length,
+                                  pattern_stats, pattern_stats_count, messages_sent, messages_received, total_message_length,
+                                  game_in_progress, completed_games, addr_len);
+            }
+        } else {
+            printf("Received message from unknown client ID %d\n", client_id);
+        }
+    }
+
+    // Check if enough clients have registered to start the game
+    if (!(*game_in_progress)) {
+        int registered_clients = 0;
+        for (int j = 0; j < MAX_CLIENTS; j++) {
+            if (clients[j].registered) {
+                registered_clients++;
+                clients[j].has_won = 0; // Reset win status at the start of the game
+            }
+        }
+
+        if (registered_clients >= MIN_PLAYERS) {
+            printf("Minimum number of clients registered. Starting game...\n");
+            *game_in_progress = 1;
+            *coin_sequence_length = 0;
+            memset(coin_sequence, 0, sizeof(char) * 1024);
+        }
+    }
+}
+
+void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
+                       char coin_sequence[], int coin_sequence_length, PatternStats pattern_stats[],
+                       int *pattern_stats_count, int *messages_sent, int* messages_received, int *total_message_length,
+                       int *game_in_progress, int *completed_games, socklen_t addr_len) {
+    if (clients[client_index].has_won) {
+        // Client has already won
+        return;
+    }
+
+    printf("Client %s:%d (ID %d) claims to have won.\n",
+           inet_ntoa(clients[client_index].address.sin_addr),
+           ntohs(clients[client_index].address.sin_port),
+           clients[client_index].client_id);
+
+    // Validate the client's claim
+    int pattern_length = clients[client_index].pattern_length;
+    if (coin_sequence_length >= pattern_length) {
+        int start_index = coin_sequence_length - pattern_length;
+        if (strncmp(&coin_sequence[start_index], clients[client_index].pattern, pattern_length) == 0) {
+            // Client's pattern matches the coin sequence
+            printf("Client %s:%d (ID %d) is validated as winner.\n",
+                   inet_ntoa(clients[client_index].address.sin_addr),
+                   ntohs(clients[client_index].address.sin_port),
+                   clients[client_index].client_id);
+
+            clients[client_index].has_won = 1;
+
+            // Update statistics
+            update_pattern_stats(pattern_stats, pattern_stats_count, clients[client_index], coin_sequence_length, 1);
+
+            // Send win message to the winner
+            const char *win_message = "WIN";
+            sendto(server_fd, win_message, strlen(win_message), 0,
+                   (struct sockaddr *)&clients[client_index].address, addr_len);
+            (*messages_sent)++;
+            *total_message_length += strlen(win_message);
+
+            // Inform all other clients that they have lost
+            const char *lose_message = "LOSE";
+            for (int i = 0; i < MAX_CLIENTS; i++) {
+                if (clients[i].registered && i != client_index && !clients[i].has_won) {
+                    sendto(server_fd, lose_message, strlen(lose_message), 0,
+                           (struct sockaddr *)&clients[i].address, addr_len);
+                    (*messages_sent)++;
+                    *total_message_length += strlen(lose_message);
+
+                    // Print information about the client who lost
+                    printf("Client %s:%d (ID %d) lost with pattern %s\n",
+                           inet_ntoa(clients[i].address.sin_addr),
+                           ntohs(clients[i].address.sin_port),
+                           clients[i].client_id,
+                           clients[i].pattern_display);
+
+                    clients[i].has_won = 1; // Mark as having finished the game
+
+                    // Update statistics for losing client
+                    update_pattern_stats(pattern_stats, pattern_stats_count, clients[i], coin_sequence_length, 0);
+                }
+            }
+
+            // End the game
+            *game_in_progress = 0;
+            (*completed_games)++;
+
+            // Print diagnostics
+            print_diagnostics(*messages_sent, *messages_received, *total_message_length, *completed_games);
+
+            // Print statistics
+            print_statistics(pattern_stats, *pattern_stats_count);
+
+            // Reset the game state
+            memset(coin_sequence, 0, sizeof(char) * 1024);
+            coin_sequence_length = 0;
+
+        } else {
+            // Invalid win claim
+            const char *invalid_message = "INVALID WIN";
+            sendto(server_fd, invalid_message, strlen(invalid_message), 0,
+                   (struct sockaddr *)&clients[client_index].address, addr_len);
+            (*messages_sent)++;
+            *total_message_length += strlen(invalid_message);
+            printf("Client %s:%d (ID %d) made an invalid win claim.\n",
+                   inet_ntoa(clients[client_index].address.sin_addr),
+                   ntohs(clients[client_index].address.sin_port),
+                   clients[client_index].client_id);
+        }
+    } else {
+        // Not enough coin flips yet
+        const char *invalid_message = "INVALID WIN";
+        sendto(server_fd, invalid_message, strlen(invalid_message), 0,
+               (struct sockaddr *)&clients[client_index].address, addr_len);
+        (*messages_sent)++;
+        *total_message_length += strlen(invalid_message);
+        printf("Client %s:%d (ID %d) made an invalid win claim (not enough flips).\n",
+               inet_ntoa(clients[client_index].address.sin_addr),
+               ntohs(clients[client_index].address.sin_port),
+               clients[client_index].client_id);
+    }
+}
+
+void update_pattern_stats(PatternStats pattern_stats[], int *pattern_stats_count,
+                          ClientInfo client, int coin_sequence_length, int win) {
+    int found = 0;
+    for (int j = 0; j < *pattern_stats_count; j++) {
+        if (strcmp(pattern_stats[j].pattern, client.pattern) == 0) {
+            if (win) {
+                pattern_stats[j].wins++;
+            }
+            pattern_stats[j].total_flips += coin_sequence_length;
+            pattern_stats[j].total_games++;
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        // Add new pattern stats
+        strcpy(pattern_stats[*pattern_stats_count].pattern, client.pattern);
+        strcpy(pattern_stats[*pattern_stats_count].pattern_display, client.pattern_display);
+        pattern_stats[*pattern_stats_count].wins = win ? 1 : 0;
+        pattern_stats[*pattern_stats_count].total_flips = coin_sequence_length;
+        pattern_stats[*pattern_stats_count].total_games = 1;
+        (*pattern_stats_count)++;
+    }
+}
+
+void print_diagnostics(int messages_sent, int messages_received, int total_message_length, int completed_games) {
+    printf("\n--- Diagnostics ---\n");
+    printf("Messages sent: %d\n", messages_sent);
+    printf("Messages received: %d\n", messages_received);
+    printf("Average message length: %.2f bytes\n",
+           (messages_sent + messages_received) > 0
+               ? (float)total_message_length / (messages_sent + messages_received)
+               : 0.0);
+    printf("Completed games: %d\n", completed_games);
+}
+
+void print_statistics(PatternStats pattern_stats[], int pattern_stats_count) {
+    printf("\n--- Statistics ---\n");
+    for (int j = 0; j < pattern_stats_count; j++) {
+        float win_probability = (float)pattern_stats[j].wins / pattern_stats[j].total_games;
+        float average_flips = (float)pattern_stats[j].total_flips / pattern_stats[j].total_games;
+        printf("Pattern: %s, Wins: %d, Total Games: %d, Win Probability: %.2f, Average Flips: %.2f\n",
+               pattern_stats[j].pattern_display, pattern_stats[j].wins,
+               pattern_stats[j].total_games, win_probability, average_flips);
+    }
+    printf("-------------------\n");
+}
+
+void send_coin_flip(int server_fd, ClientInfo clients[], int *messages_sent, int *total_message_length,
+                    char coin_sequence[], int *coin_sequence_length, socklen_t addr_len) {
+    // Generate a random bit
+    int rand_bit = rand() % 2;
+    char coin_flip_char = rand_bit ? '1' : '0'; // Use '0' and '1'
+
+    // Append the coin flip to the coin sequence
+    if (*coin_sequence_length < 1023) { // Leave space for null terminator
+        coin_sequence[(*coin_sequence_length)++] = coin_flip_char;
+        coin_sequence[*coin_sequence_length] = '\0';
+    } else {
+        // Shift the sequence to make room
+        memmove(coin_sequence, coin_sequence + 1, *coin_sequence_length - 1);
+        coin_sequence[*coin_sequence_length - 1] = coin_flip_char;
+    }
+
+    // Send the coin flip to all clients
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].registered && !clients[i].has_won) {
+            sendto(server_fd, &coin_flip_char, 1, 0,
+                   (struct sockaddr *)&clients[i].address, addr_len);
+            (*messages_sent)++;
+            *total_message_length += 1;
+        }
+    }
 }
