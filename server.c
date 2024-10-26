@@ -136,7 +136,7 @@ int main() {
     while (1) {
         // Set timeout for select
         timeout.tv_sec = 0;
-        timeout.tv_usec = 10000; // 100 milliseconds
+        timeout.tv_usec = 1000; // 100 milliseconds
 
         // Set up the file descriptor set
         FD_ZERO(&readfds);
@@ -202,7 +202,7 @@ void register_client(int server_fd, ClientInfo clients[], struct sockaddr_in cli
             clients[i].client_id = (*next_client_id)++;
             clients[i].address = client_addr;
             clients[i].pattern = sequence;
-            clients[i].pattern_length = 8 - __builtin_clz(sequence); // Calculate pattern length
+            clients[i].pattern_length = 8 - __builtin_clz(sequence); // Calculate pattern length //Tu jest cos nie tak
             clients[i].registered = 1;
             clients[i].has_won = 0;
             clients[i].currently_playing = 1;
@@ -210,6 +210,21 @@ void register_client(int server_fd, ClientInfo clients[], struct sockaddr_in cli
             printf("New client registered: %s:%d, assigned ID %d\n",
                    inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port),
                    clients[i].client_id);
+            printf("Client ID: %d\n", clients[i].client_id);
+            printf("Address: %s:%d\n", inet_ntoa(clients[i].address.sin_addr), ntohs(clients[i].address.sin_port));
+            printf("Pattern: 0x%02X\n", clients[i].pattern);
+            // Print the pattern in binary
+            printf("Pattern (exact bits): ");
+            for (int i = 7; i >= 0; i--) {
+                uint8_t bit = (clients[i].pattern >> i) & 0b1;
+                printf("%d", bit);
+            }
+            printf("\n");
+
+            printf("Pattern Length: %d\n", clients[i].pattern_length);
+            printf("Registered: %d\n", clients[i].registered);
+            printf("Has Won: %d\n", clients[i].has_won);
+            printf("Currently Playing: %d\n", clients[i].currently_playing);
 
             // Send the client ID to the client
             uint16_t id_message = create_server_message(0, MSG_REGISTER, clients[i].client_id);
@@ -293,6 +308,7 @@ void process_win_claim(int server_fd, ClientInfo clients[], int client_index,
 
     // Validate the client's claim
     int pattern_length = clients[client_index].pattern_length;
+    printf("Coin_sequence_lenght: %d Pattern_lenght: %d\n", coin_sequence_length, pattern_length);
     if (coin_sequence_length >= pattern_length) {
         uint8_t pattern_mask = (1 << pattern_length) - 1;
         uint8_t sequence_pattern = 0;
@@ -462,6 +478,10 @@ void print_diagnostics(int completed_games) {
 void print_statistics(PatternStats pattern_stats[], int pattern_stats_count) {
     printf("\n--- Statistics ---\n");
     for (int j = 0; j < pattern_stats_count; j++) {
+        printf("Wins: %.2f\n", (float)pattern_stats[j].wins);
+        printf("Total games: %.2f\n", (float)pattern_stats[j].total_games);
+        printf("Total flips: %.2f\n", (float)pattern_stats[j].total_flips);
+
         float win_probability = (float)pattern_stats[j].wins / pattern_stats[j].total_games;
         float average_flips = (float)pattern_stats[j].total_flips / pattern_stats[j].total_games;
 
@@ -469,8 +489,22 @@ void print_statistics(PatternStats pattern_stats[], int pattern_stats_count) {
         char pattern_display[MAX_PATTERN_LENGTH + 1];
         uint8_t pattern = pattern_stats[j].pattern;
         int length = pattern_stats[j].pattern_length;
+
+        // Print the exact bit representation of pattern
+        printf("Pattern lenght from pattern_stats: %d\n", pattern_stats[j].pattern_length);
+        printf("Pattern lenght int: %d\n", length);
+        printf("Pattern (exact bits): ");
+        for (int i = 7; i >= 0; i--) {
+            uint8_t bit = (pattern >> (length - 1 - i)) & 0b1;
+            printf("%d", bit);
+        }
+        printf("\n");
+
+        printf("Pattern Length: %d\n", pattern_stats[j].pattern_length);
+
         for (int i = 0; i < length; i++) {
-            uint8_t bit = (pattern >> (8 - length + i)) & 0b1;
+            uint8_t bit = (pattern >> (length - 1 - i)) & 0b1;
+            printf("Bit %d: %d\n", i, bit);
             pattern_display[i] = (bit == 0) ? 'H' : 'T';
         }
         pattern_display[length] = '\0';

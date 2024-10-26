@@ -181,32 +181,35 @@ void game_loop(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, char
             valread = recvfrom(sock, &message, sizeof(message), 0, NULL, NULL);
             if (valread > 0) {
                 uint8_t toss, message_code, server_client_id;
-                // Parse the message
+
                 parse_server_message(message, &toss, &message_code, &server_client_id);
                 if (message_code == MSG_LOSE && server_client_id == client_id) {
-                    printf("You have lost the game. Better luck next time!\n");
+                    printf("You have lost the game after %d flips. Better luck next time!\n", flips-1);
                     game_over = 1;
+                    break;
                 }
-                // This is a coin flip message
-                flips++;
+                if (!game_over) {
+                    // This is a coin flip message
+                    flips++;
+                    // Convert toss bit to 'H' or 'T'
+                    char coin_flip = (toss == 0) ? 'H' : 'T';
 
-                // Convert toss bit to 'H' or 'T'
-                char coin_flip = (toss == 0) ? 'H' : 'T';
+                    printf("Received coin flip: %c\n", coin_flip);
+                    // Parse the message
+                    // Update sequence buffer to keep last pattern_length bits
+                    sequence_buffer = ((sequence_buffer << 1) | toss) & ((1 << pattern_length) - 1);
 
-                // Print the coin flip
-                printf("Received coin flip: %c\n", coin_flip);
-
-                // Update sequence buffer to keep last pattern_length bits
-                sequence_buffer = ((sequence_buffer << 1) | toss) & ((1 << pattern_length) - 1);
-
-                if (flips >= pattern_length) {
-                    if (sequence_buffer == pattern_binary) {
-                        // Send WIN message to server
-                        uint16_t win_message = create_client_message(MSG_WIN, client_id, 0);
-                        sendto(sock, &win_message, sizeof(win_message), 0, (const struct sockaddr *)serv_addr, addr_len);
-                        printf("Your pattern '%s' occurred after %d flips. Claiming win...\n", pattern, flips);
+                    if (flips >= pattern_length) {
+                        if (sequence_buffer == pattern_binary) {
+                            // Send WIN message to server
+                            uint16_t win_message = create_client_message(MSG_WIN, client_id, 0);
+                            sendto(sock, &win_message, sizeof(win_message), 0, (const struct sockaddr *)serv_addr, addr_len);
+                            printf("Your pattern '%s' occurred after %d flips. Claiming win...\n", pattern, flips);
+                            game_over = 1;
+                        }
                     }
                 }
+                
             }
         }
         // After game over
