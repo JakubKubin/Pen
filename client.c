@@ -39,9 +39,9 @@
 int create_udp_socket();
 void get_user_pattern(char *pattern, uint8_t *pattern_binary, int *pattern_length);
 void set_server_address(struct sockaddr_in *serv_addr);
-void register_with_server(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, uint8_t pattern_binary, uint8_t *client_id);
+void register_with_server(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, uint8_t pattern_binary, int pattern_length, uint8_t *client_id);
 void game_loop(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, char *pattern, uint8_t pattern_binary, int pattern_length, uint8_t client_id);
-uint16_t create_client_message(uint8_t message_code, uint8_t client_id, uint8_t sequence);
+uint16_t create_client_message(uint8_t message_code, uint8_t client_id, uint8_t sequence, uint8_t pattern_length);
 void parse_server_message(uint16_t message, uint8_t *toss, uint8_t *message_code, uint8_t *client_id);
 
 int main() {
@@ -63,7 +63,7 @@ int main() {
     set_server_address(&serv_addr);
 
     // Register with server
-    register_with_server(sock, &serv_addr, addr_len, pattern_binary, &client_id);
+    register_with_server(sock, &serv_addr, addr_len, pattern_binary, pattern_length, &client_id);
 
     // Start game loop
     game_loop(sock, &serv_addr, addr_len, pattern, pattern_binary, pattern_length, client_id);
@@ -126,12 +126,12 @@ void set_server_address(struct sockaddr_in *serv_addr) {
 }
 
 // Function to register with the server
-void register_with_server(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, uint8_t pattern_binary, uint8_t *client_id) {
+void register_with_server(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, uint8_t pattern_binary, int pattern_length, uint8_t *client_id) {
     uint16_t message;
     ssize_t valread;
 
     // Create registration message
-    message = create_client_message(MSG_REGISTER, 0, pattern_binary);
+    message = create_client_message(MSG_REGISTER, 0, pattern_binary, pattern_length);
 
     // Send registration message to server
     sendto(sock, &message, sizeof(message), 0, (const struct sockaddr *)serv_addr, addr_len);
@@ -184,7 +184,7 @@ void game_loop(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, char
 
                 parse_server_message(message, &toss, &message_code, &server_client_id);
                 if (message_code == MSG_LOSE && server_client_id == client_id) {
-                    printf("You have lost the game after %d flips. Better luck next time!\n", flips-1);
+                    printf("You have lost the game after %d flips. Better luck next time!\n", flips);
                     game_over = 1;
                     break;
                 }
@@ -202,7 +202,7 @@ void game_loop(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, char
                     if (flips >= pattern_length) {
                         if (sequence_buffer == pattern_binary) {
                             // Send WIN message to server
-                            uint16_t win_message = create_client_message(MSG_WIN, client_id, 0);
+                            uint16_t win_message = create_client_message(MSG_WIN, client_id, 0, pattern_length);
                             sendto(sock, &win_message, sizeof(win_message), 0, (const struct sockaddr *)serv_addr, addr_len);
                             printf("Your pattern '%s' occurred after %d flips. Claiming win...\n", pattern, flips);
                             game_over = 1;
@@ -219,7 +219,7 @@ void game_loop(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, char
         scanf(" %c", &choice);
         if (choice == 'y' || choice == 'Y') {
             // Send READY message to the server
-            uint16_t ready_message = create_client_message(MSG_READY, client_id, 0);
+            uint16_t ready_message = create_client_message(MSG_READY, client_id, 0, pattern_length);
             sendto(sock, &ready_message, sizeof(ready_message), 0, (const struct sockaddr *)serv_addr, addr_len);
             printf("Sent READY message to server.\n");
             // Reset game variables
@@ -235,16 +235,25 @@ void game_loop(int sock, struct sockaddr_in *serv_addr, socklen_t addr_len, char
 }
 
 // Function to create a client message according to the ALP protocol
-uint16_t create_client_message(uint8_t message_code, uint8_t client_id, uint8_t sequence) {
+uint16_t create_client_message(uint8_t message_code, uint8_t client_id, uint8_t sequence, uint8_t pattern_length) {
     uint16_t message = 0;
     // Transmitter flag is 0 (client)
     // Toss bit is 0
     // Set message code in bits 13-12
     message |= (message_code & 0b11) << BITS_MESSAGE;
-    // Set client ID in bits 11-8
-    message |= (client_id & 0b1111) << BITS_CLIENT_ID;
-    // Set sequence in bits 7-0
+
+    if (message_code == MSG_REGISTER) {
+        // In registration, encode pattern length in bits 11-9
+        message |= ((pattern_length - 1) & 0b111) << 9;
+        // Bit 8 is unused and set to 0
+    } else {
+        // Set client ID in bits 11-8
+        message |= (client_id & 0b1111) << BITS_CLIENT_ID;
+    }
+
+    // Set sequence/pattern in bits 7-0
     message |= (sequence & 0xFF);
+
     return htons(message); // Convert to network byte order
 }
 
@@ -258,9 +267,9 @@ void parse_server_message(uint16_t message, uint8_t *toss, uint8_t *message_code
     *message_code = (message >> BITS_MESSAGE) & 0b11;
     *client_id = (message >> BITS_CLIENT_ID) & 0b1111;
     // Bits 7-0 (sequence) are ignored for server messages
-    printf("Parsed server message:\n");
-    printf("  Transmitter Flag: %d\n", transmitter_flag);
-    printf("  Toss: %d\n", *toss);
-    printf("  Message Code: %d\n", *message_code);
-    printf("  Client ID: %d\n", *client_id);
+    // printf("Parsed server message:\n");
+    // printf("  Transmitter Flag: %d\n", transmitter_flag);
+    // printf("  Toss: %d\n", *toss);
+    // printf("  Message Code: %d\n", *message_code);
+    // printf("  Client ID: %d\n", *client_id);
 }
